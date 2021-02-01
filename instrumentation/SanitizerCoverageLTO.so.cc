@@ -1246,8 +1246,10 @@ void ModuleSanitizerCoverage::instrumentFunction(
         Function *Callee = callInst->getCalledFunction();
         if (!Callee) continue;
         if (callInst->getCallingConv() != llvm::CallingConv::C) continue;
-        StringRef FuncName = Callee->getName();
-        if (FuncName.compare(StringRef("__afl_coverage_interesting"))) continue;
+        if (Callee->hasName()) {
+          StringRef FuncName = Callee->getName();
+          if (FuncName.compare(StringRef("__afl_coverage_interesting"))) continue;
+        }
 
         Value *val = ConstantInt::get(Int32Ty, ++afl_global_id);
         callInst->setOperand(1, val);
