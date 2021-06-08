@@ -95,6 +95,7 @@ class AFLLTOPass : public ModulePass {
   unsigned long long int map_addr = 0x10000;
   const char *           skip_nozero = NULL;
   const char *           use_threadsafe_counters = nullptr;
+  ValueMap<Function*, LoadInst*> MapPtrLoadCache; 
 
 };
 
@@ -110,6 +111,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
   char *                           ptr;
   FILE *                           documentFile = NULL;
   size_t                           found = 0;
+
+  MapPtrLoadCache.clear();
 
   srand((unsigned int)time(NULL));
 
@@ -825,7 +828,7 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
           /* Load SHM pointer */
 
-          Value *MapPtrIdx;
+          Value *MapPtrIdx = nullptr;
 
           if (map_addr) {
 
@@ -833,9 +836,17 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
           } else {
 
-            LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
-            MapPtr->setMetadata(M.getMDKindID("nosanitize"),
-                                MDNode::get(C, None));
+            LoadInst *MapPtr = MapPtrLoadCache.lookup(newBB->getParent());
+
+            if (!MapPtr) {
+              auto &entrybb = newBB->getParent()->getEntryBlock();
+              IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
+              MapPtr = IRBStart.CreateLoad(AFLMapPtr);
+              MapPtr->setMetadata(M.getMDKindID("nosanitize"),
+                                  MDNode::get(C, None));
+              MapPtrLoadCache.insert(std::make_pair(newBB->getParent(), MapPtr));
+            }
+
             MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
 
           }
@@ -1061,6 +1072,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
     }
 
   }
+
+  MapPtrLoadCache.clear();
 
   return true;
 
