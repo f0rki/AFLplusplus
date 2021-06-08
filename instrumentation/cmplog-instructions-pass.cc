@@ -419,7 +419,8 @@ bool CmpLogInstructions::hookInstrs(Module &M) {
       IntegerType *        intTyOp1 = NULL;
       unsigned             max_size = 0, cast_size = 0;
       unsigned char        attr = 0;
-      std::vector<Value *> args;
+      SmallVector<Value *, 4> args;
+      SmallVector<std::pair<Value*, Value*>, 8> worklist;
 
       CmpInst *cmpInst = dyn_cast<CmpInst>(selectcmpInst);
 
@@ -465,138 +466,161 @@ bool CmpLogInstructions::hookInstrs(Module &M) {
 
       }
 
-      if (selectcmpInst->getOpcode() == Instruction::FCmp) {
+      auto Ty = op0->getType();
+      if (VectorType* VT = dyn_cast<VectorType>(Ty)) {
+        // Current LLVM's Scalarizer pass does the same, so this seems to be
+        // safe for now?
+        unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
+        for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
 
-        auto ty0 = op0->getType();
-        if (ty0->isHalfTy()
-#if LLVM_VERSION_MAJOR >= 11
-            || ty0->isBFloatTy()
-#endif
-        )
-          max_size = 16;
-        else if (ty0->isFloatTy())
-          max_size = 32;
-        else if (ty0->isDoubleTy())
-          max_size = 64;
-        else if (ty0->isX86_FP80Ty())
-          max_size = 80;
-        else if (ty0->isFP128Ty() || ty0->isPPC_FP128Ty())
-          max_size = 128;
-
-        attr += 8;
-
+          // we hook each vector element on its own. We first require an
+          // extractelement instruction to get the actual primitive values 
+          // of both operands out of the vector.
+          auto op0X = IRB.CreateExtractElement(op0, Elem);
+          auto op1X = IRB.CreateExtractElement(op1, Elem);
+          worklist.push_back(std::make_pair(op0X, op1X));
+        }
       } else {
-
-        intTyOp0 = dyn_cast<IntegerType>(op0->getType());
-        intTyOp1 = dyn_cast<IntegerType>(op1->getType());
-
-        if (intTyOp0 && intTyOp1) {
-
-          max_size = intTyOp0->getBitWidth() > intTyOp1->getBitWidth()
-                         ? intTyOp0->getBitWidth()
-                         : intTyOp1->getBitWidth();
-
-        }
-
+          worklist.push_back(std::make_pair(op0, op1));
       }
 
-      if (!max_size || max_size < 16) { continue; }
+      for (auto oppair : worklist) {
+        args.clear(); // clear function call args vector - new call; new args
+        op0 = oppair.first;
+        op1 = oppair.second;
 
-      if (max_size % 8) { max_size = (((max_size / 8) + 1) * 8); }
+        if (selectcmpInst->getOpcode() == Instruction::FCmp) {
 
-      if (max_size > 128) {
+          auto ty0 = op0->getType();
+          if (ty0->isHalfTy()
+#if LLVM_VERSION_MAJOR >= 11
+              || ty0->isBFloatTy()
+#endif
+          )
+            max_size = 16;
+          else if (ty0->isFloatTy())
+            max_size = 32;
+          else if (ty0->isDoubleTy())
+            max_size = 64;
+          else if (ty0->isX86_FP80Ty())
+            max_size = 80;
+          else if (ty0->isFP128Ty() || ty0->isPPC_FP128Ty())
+            max_size = 128;
 
-        if (!be_quiet) {
+          attr += 8;
 
-          fprintf(stderr,
-                  "Cannot handle this compare bit size: %u (truncating)\n",
-                  max_size);
+        } else {
 
-        }
+          intTyOp0 = dyn_cast<IntegerType>(op0->getType());
+          intTyOp1 = dyn_cast<IntegerType>(op1->getType());
 
-        max_size = 128;
+          if (intTyOp0 && intTyOp1) {
 
-      }
-
-      // do we need to cast?
-      switch (max_size) {
-
-        case 8:
-        case 16:
-        case 32:
-        case 64:
-        case 128:
-          cast_size = max_size;
-          break;
-        default:
-          cast_size = 128;
-
-      }
-
-      // errs() << "[CMPLOG] cmp  " << *cmpInst << "(in function " <<
-      // cmpInst->getFunction()->getName() << ")\n";
-
-      // first bitcast to integer type of the same bitsize as the original
-      // type (this is a nop, if already integer)
-      Value *op0_i = IRB.CreateBitCast(
-          op0, IntegerType::get(C, op0->getType()->getPrimitiveSizeInBits()));
-      // then create a int cast, which does zext, trunc or bitcast. In our case
-      // usually zext to the next larger supported type (this is a nop if
-      // already the right type)
-      Value *V0 =
-          IRB.CreateIntCast(op0_i, IntegerType::get(C, cast_size), false);
-      args.push_back(V0);
-      Value *op1_i = IRB.CreateBitCast(
-          op1, IntegerType::get(C, op1->getType()->getPrimitiveSizeInBits()));
-      Value *V1 =
-          IRB.CreateIntCast(op1_i, IntegerType::get(C, cast_size), false);
-      args.push_back(V1);
-
-      // errs() << "[CMPLOG] casted parameters:\n0: " << *V0 << "\n1: " << *V1
-      // << "\n";
-
-      ConstantInt *attribute = ConstantInt::get(Int8Ty, attr);
-      args.push_back(attribute);
-
-      if (cast_size != max_size) {
-
-        ConstantInt *bitsize = ConstantInt::get(Int8Ty, (max_size / 8) - 1);
-        args.push_back(bitsize);
-
-      }
-
-      // fprintf(stderr, "_ExtInt(%u) castTo %u with attr %u didcast %u\n",
-      //         max_size, cast_size, attr);
-
-      switch (cast_size) {
-
-        case 8:
-          IRB.CreateCall(cmplogHookIns1, args);
-          break;
-        case 16:
-          IRB.CreateCall(cmplogHookIns2, args);
-          break;
-        case 32:
-          IRB.CreateCall(cmplogHookIns4, args);
-          break;
-        case 64:
-          IRB.CreateCall(cmplogHookIns8, args);
-          break;
-        case 128:
-          if (max_size == 128) {
-
-            IRB.CreateCall(cmplogHookIns16, args);
-
-          } else {
-
-            IRB.CreateCall(cmplogHookInsN, args);
+            max_size = intTyOp0->getBitWidth() > intTyOp1->getBitWidth()
+                           ? intTyOp0->getBitWidth()
+                           : intTyOp1->getBitWidth();
 
           }
 
-          break;
+        }
 
-      }
+        if (!max_size || max_size < 16) { continue; }
 
+        if (max_size % 8) { max_size = (((max_size / 8) + 1) * 8); }
+
+        if (max_size > 128) {
+
+          if (!be_quiet) {
+
+            fprintf(stderr,
+                    "Cannot handle this compare bit size: %u (truncating)\n",
+                    max_size);
+
+          }
+
+          max_size = 128;
+
+        }
+
+        // do we need to cast?
+        switch (max_size) {
+
+          case 8:
+          case 16:
+          case 32:
+          case 64:
+          case 128:
+            cast_size = max_size;
+            break;
+          default:
+            cast_size = 128;
+
+        }
+
+        // errs() << "[CMPLOG] cmp  " << *cmpInst << "(in function " <<
+        // cmpInst->getFunction()->getName() << ")\n";
+
+        // first bitcast to integer type of the same bitsize as the original
+        // type (this is a nop, if already integer)
+        Value *op0_i = IRB.CreateBitCast(
+            op0, IntegerType::get(C, op0->getType()->getPrimitiveSizeInBits()));
+        // then create a int cast, which does zext, trunc or bitcast. In our case
+        // usually zext to the next larger supported type (this is a nop if
+        // already the right type)
+        Value *V0 =
+            IRB.CreateIntCast(op0_i, IntegerType::get(C, cast_size), false);
+        args.push_back(V0);
+        Value *op1_i = IRB.CreateBitCast(
+            op1, IntegerType::get(C, op1->getType()->getPrimitiveSizeInBits()));
+        Value *V1 =
+            IRB.CreateIntCast(op1_i, IntegerType::get(C, cast_size), false);
+        args.push_back(V1);
+
+        // errs() << "[CMPLOG] casted parameters:\n0: " << *V0 << "\n1: " << *V1
+        // << "\n";
+
+        ConstantInt *attribute = ConstantInt::get(Int8Ty, attr);
+        args.push_back(attribute);
+
+        if (cast_size != max_size) {
+
+          ConstantInt *bitsize = ConstantInt::get(Int8Ty, (max_size / 8) - 1);
+          args.push_back(bitsize);
+
+        }
+
+        // fprintf(stderr, "_ExtInt(%u) castTo %u with attr %u didcast %u\n",
+        //         max_size, cast_size, attr);
+
+        switch (cast_size) {
+
+          case 8:
+            IRB.CreateCall(cmplogHookIns1, args);
+            break;
+          case 16:
+            IRB.CreateCall(cmplogHookIns2, args);
+            break;
+          case 32:
+            IRB.CreateCall(cmplogHookIns4, args);
+            break;
+          case 64:
+            IRB.CreateCall(cmplogHookIns8, args);
+            break;
+          case 128:
+            if (max_size == 128) {
+
+              IRB.CreateCall(cmplogHookIns16, args);
+
+            } else {
+
+              IRB.CreateCall(cmplogHookInsN, args);
+
+            }
+
+            break;
+
+          }
+        }
     }
 
   }
