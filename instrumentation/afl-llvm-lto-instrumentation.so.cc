@@ -59,12 +59,10 @@ using namespace llvm;
 namespace {
 
 class AFLLTOPass : public ModulePass {
-
  public:
   static char ID;
 
   AFLLTOPass() : ModulePass(ID) {
-
     char *ptr;
 
     if (getenv("AFL_DEBUG")) debug = 1;
@@ -76,17 +74,15 @@ class AFLLTOPass : public ModulePass {
 
     skip_nozero = getenv("AFL_LLVM_SKIP_NEVERZERO");
 
-    const char * c = getenv("AFL_LLVM_EXPLICIT_CMP_FEEDBACK"); 
-    cmp_feedback = c != nullptr && (c[0] == '1' || c[0] == 'y' || c[0] == 'Y' || c[0] == 't' || c[0] == 'T');
-
+    const char *c = getenv("AFL_LLVM_EXPLICIT_CMP_FEEDBACK");
+    cmp_feedback = c != nullptr && (c[0] == '1' || c[0] == 'y' || c[0] == 'Y' ||
+                                    c[0] == 't' || c[0] == 'T');
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-
     ModulePass::getAnalysisUsage(AU);
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<LoopInfoWrapperPass>();
-
   }
 
   bool runOnModule(Module &M) override;
@@ -100,9 +96,9 @@ class AFLLTOPass : public ModulePass {
   const char *           use_threadsafe_counters = nullptr;
   bool                   cmp_feedback = false;
 
-  bool addCompareFeedback(BasicBlock* BB, Module& M);
+  bool addCompareFeedback(BasicBlock *BB, Module &M);
 
-
+  IntegerType *Int1Ty = nullptr;
   IntegerType *Int8Ty = nullptr;
   IntegerType *Int32Ty = nullptr;
   IntegerType *Int64Ty = nullptr;
@@ -113,14 +109,12 @@ class AFLLTOPass : public ModulePass {
   GlobalVariable *AFLMapPtr = nullptr;
   Value *         MapPtrFixed = nullptr;
 
-  ValueMap<Function*, LoadInst*> MapPtrLoadCache; 
-
+  ValueMap<Function *, LoadInst *> MapPtrLoadCache;
 };
 
 }  // namespace
 
 bool AFLLTOPass::runOnModule(Module &M) {
-
   LLVMContext &            C = M.getContext();
   std::vector<std::string> dictionary;
   //  std::vector<CallInst *>          calls;
@@ -137,6 +131,7 @@ bool AFLLTOPass::runOnModule(Module &M) {
   unsigned long long int moduleID =
       (((unsigned long long int)(rand() & 0xffffffff)) << 32) | getpid();
 
+  Int1Ty = IntegerType::getInt1Ty(C);
   Int8Ty = IntegerType::getInt8Ty(C);
   Int32Ty = IntegerType::getInt32Ty(C);
   Int64Ty = IntegerType::getInt64Ty(C);
@@ -145,7 +140,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
   setvbuf(stdout, NULL, _IONBF, 0);
 
   if ((isatty(2) && !getenv("AFL_QUIET")) || debug) {
-
     SAYF(cCYA "afl-llvm-lto" VERSION cRST
               " by Marc \"vanHauser\" Heuse <mh@mh-sec.de>\n");
 
@@ -156,10 +150,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
   use_threadsafe_counters = getenv("AFL_LLVM_THREADSAFE_INST");
 
   if ((ptr = getenv("AFL_LLVM_DOCUMENT_IDS")) != NULL) {
-
     if ((documentFile = fopen(ptr, "a")) == NULL)
       WARNF("Cannot access document file %s", ptr);
-
   }
 
   // we make this the default as the fixed map has problems with
@@ -168,36 +160,27 @@ bool AFLLTOPass::runOnModule(Module &M) {
   map_addr = 0;
 
   if ((ptr = getenv("AFL_LLVM_MAP_ADDR"))) {
-
     uint64_t val;
     if (!*ptr || !strcmp(ptr, "0") || !strcmp(ptr, "0x0")) {
-
       map_addr = 0;
 
     } else if (getenv("AFL_LLVM_MAP_DYNAMIC")) {
-
       FATAL(
           "AFL_LLVM_MAP_ADDR and AFL_LLVM_MAP_DYNAMIC cannot be used together");
 
     } else if (strncmp(ptr, "0x", 2) != 0) {
-
       map_addr = 0x10000;  // the default
 
     } else {
-
       val = strtoull(ptr, NULL, 16);
       if (val < 0x100 || val > 0xffffffff00000000) {
-
         FATAL(
             "AFL_LLVM_MAP_ADDR must be a value between 0x100 and "
             "0xffffffff00000000");
-
       }
 
       map_addr = val;
-
     }
-
   }
 
   if (debug) { fprintf(stderr, "map address is 0x%llx\n", map_addr); }
@@ -205,17 +188,14 @@ bool AFLLTOPass::runOnModule(Module &M) {
   /* Get/set the globals for the SHM region. */
 
   if (!map_addr) {
-
     AFLMapPtr =
         new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
                            GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
   } else {
-
     ConstantInt *MapAddr = ConstantInt::get(Int64Ty, map_addr);
     MapPtrFixed =
         ConstantExpr::getIntToPtr(MapAddr, PointerType::getUnqual(Int8Ty));
-
   }
 
   Zero = ConstantInt::get(Int8Ty, 0);
@@ -247,7 +227,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
   int inst_blocks = 0;
 
   for (auto &F : M) {
-
     /*For debugging
     AttributeSet X = F.getAttributes().getFnAttributes();
     fprintf(stderr, "DEBUG: Module %s Function %s attributes %u\n",
@@ -261,20 +240,17 @@ bool AFLLTOPass::runOnModule(Module &M) {
     // the instrument file list check
     AttributeList Attrs = F.getAttributes();
     if (Attrs.hasAttribute(-1, StringRef("skipinstrument"))) {
-
       if (debug)
         fprintf(stderr,
                 "DEBUG: Function %s is not in a source file that was specified "
                 "in the instrument file list\n",
                 F.getName().str().c_str());
       continue;
-
     }
 
     std::vector<BasicBlock *> InsBlocks;
 
     if (autodictionary) {
-
       /*  Some implementation notes.
        *
        *  We try to handle 3 cases:
@@ -304,30 +280,24 @@ bool AFLLTOPass::runOnModule(Module &M) {
        */
 
       for (auto &BB : F) {
-
         for (auto &IN : BB) {
-
           CallInst *callInst = nullptr;
           CmpInst * cmpInst = nullptr;
 
           if ((cmpInst = dyn_cast<CmpInst>(&IN))) {
-
             Value *      op = cmpInst->getOperand(1);
             ConstantInt *ilen = dyn_cast<ConstantInt>(op);
 
             if (ilen && ilen->uge(0xffffffffffffffff) == false) {
-
               u64 val2 = 0, val = ilen->getZExtValue();
               u32 len = 0;
               if (val > 0x10000 && val < 0xffffffff) len = 4;
               if (val > 0x100000001 && val < 0xffffffffffffffff) len = 8;
 
               if (len) {
-
                 auto c = cmpInst->getPredicate();
 
                 switch (c) {
-
                   case CmpInst::FCMP_OGT:  // fall through
                   case CmpInst::FCMP_OLE:  // fall through
                   case CmpInst::ICMP_SLE:  // fall through
@@ -336,10 +306,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
                     // signed comparison and it is a negative constant
                     if ((len == 4 && (val & 80000000)) ||
                         (len == 8 && (val & 8000000000000000))) {
-
                       if ((val & 0xffff) != 1) val2 = val - 1;
                       break;
-
                     }
 
                     // fall through
@@ -359,10 +327,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
                     // signed comparison and it is a negative constant
                     if ((len == 4 && (val & 80000000)) ||
                         (len == 8 && (val & 8000000000000000))) {
-
                       if ((val & 0xffff) != 1) val2 = val - 1;
                       break;
-
                     }
 
                     // fall through
@@ -376,27 +342,20 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
                   default:
                     val2 = 0;
-
                 }
 
                 dictionary.push_back(std::string((char *)&val, len));
                 found++;
 
                 if (val2) {
-
                   dictionary.push_back(std::string((char *)&val2, len));
                   found++;
-
                 }
-
               }
-
             }
-
           }
 
           if ((callInst = dyn_cast<CallInst>(&IN))) {
-
             bool   isStrcmp = true;
             bool   isMemcmp = true;
             bool   isStrncmp = true;
@@ -427,7 +386,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
             /* we do something different here, putting this BB and the
                successors in a block map */
             if (!FuncName.compare("__afl_persistent_loop")) {
-
               BlockList.push_back(&BB);
               /*
                             for (succ_iterator SI = succ_begin(&BB), SE =
@@ -439,7 +397,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
                             }
 
               */
-
             }
 
             if (!isStrcmp && !isMemcmp && !isStrncmp && !isStrcasecmp &&
@@ -496,27 +453,21 @@ bool AFLLTOPass::runOnModule(Module &M) {
             bool        HasStr1;
             getConstantStringInfo(Str1P, TmpStr);
             if (TmpStr.empty()) {
-
               HasStr1 = false;
 
             } else {
-
               HasStr1 = true;
               Str1 = TmpStr.str();
-
             }
 
             bool HasStr2;
             getConstantStringInfo(Str2P, TmpStr);
             if (TmpStr.empty()) {
-
               HasStr2 = false;
 
             } else {
-
               HasStr2 = true;
               Str2 = TmpStr.str();
-
             }
 
             if (debug)
@@ -528,49 +479,33 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
             // we handle the 2nd parameter first because of llvm memcpy
             if (!HasStr2) {
-
               auto *Ptr = dyn_cast<ConstantExpr>(Str2P);
               if (Ptr && Ptr->isGEPWithNoNotionalOverIndexing()) {
-
                 if (auto *Var = dyn_cast<GlobalVariable>(Ptr->getOperand(0))) {
-
                   if (Var->hasInitializer()) {
-
                     if (auto *Array = dyn_cast<ConstantDataArray>(
                             Var->getInitializer())) {
-
                       HasStr2 = true;
                       Str2 = Array->getRawDataValues().str();
-
                     }
-
                   }
-
                 }
-
               }
-
             }
 
             // for the internal memcpy routine we only care for the second
             // parameter and are not reporting anything.
             if (isIntMemcpy == true) {
-
               if (HasStr2 == true) {
-
                 Value *      op2 = callInst->getArgOperand(2);
                 ConstantInt *ilen = dyn_cast<ConstantInt>(op2);
                 if (ilen) {
-
                   uint64_t literalLength = Str2.size();
                   uint64_t optLength = ilen->getZExtValue();
                   if (literalLength + 1 == optLength) {
-
                     Str2.append("\0", 1);  // add null byte
                     // addedNull = true;
-
                   }
-
                 }
 
                 valueMap[Str1P] = new std::string(Str2);
@@ -578,71 +513,51 @@ bool AFLLTOPass::runOnModule(Module &M) {
                 if (debug)
                   fprintf(stderr, "Saved: %s for %p\n", Str2.c_str(), Str1P);
                 continue;
-
               }
 
               continue;
-
             }
 
             // Neither a literal nor a global variable?
             // maybe it is a local variable that we saved
             if (!HasStr2) {
-
               std::string *strng = valueMap[Str2P];
               if (strng && !strng->empty()) {
-
                 Str2 = *strng;
                 HasStr2 = true;
                 if (debug)
                   fprintf(stderr, "Filled2: %s for %p\n", strng->c_str(),
                           Str2P);
-
               }
-
             }
 
             if (!HasStr1) {
-
               auto Ptr = dyn_cast<ConstantExpr>(Str1P);
 
               if (Ptr && Ptr->isGEPWithNoNotionalOverIndexing()) {
-
                 if (auto *Var = dyn_cast<GlobalVariable>(Ptr->getOperand(0))) {
-
                   if (Var->hasInitializer()) {
-
                     if (auto *Array = dyn_cast<ConstantDataArray>(
                             Var->getInitializer())) {
-
                       HasStr1 = true;
                       Str1 = Array->getRawDataValues().str();
-
                     }
-
                   }
-
                 }
-
               }
-
             }
 
             // Neither a literal nor a global variable?
             // maybe it is a local variable that we saved
             if (!HasStr1) {
-
               std::string *strng = valueMap[Str1P];
               if (strng && !strng->empty()) {
-
                 Str1 = *strng;
                 HasStr1 = true;
                 if (debug)
                   fprintf(stderr, "Filled1: %s for %p\n", strng->c_str(),
                           Str1P);
-
               }
-
             }
 
             /* handle cases of one string is const, one string is variable */
@@ -659,63 +574,48 @@ bool AFLLTOPass::runOnModule(Module &M) {
             if (optLen < 2 || (optLen == 2 && !thestring[1])) { continue; }
 
             if (isMemcmp || isStrncmp || isStrncasecmp) {
-
               Value *      op2 = callInst->getArgOperand(2);
               ConstantInt *ilen = dyn_cast<ConstantInt>(op2);
 
               if (ilen) {
-
                 uint64_t literalLength = optLen;
                 optLen = ilen->getZExtValue();
                 if (optLen < 2) { continue; }
                 if (literalLength + 1 == optLen) {  // add null byte
                   thestring.append("\0", 1);
                   addedNull = true;
-
                 }
-
               }
-
             }
 
             // add null byte if this is a string compare function and a null
             // was not already added
             if (!isMemcmp) {
-
               if (addedNull == false && thestring[optLen - 1] != '\0') {
-
                 thestring.append("\0", 1);  // add null byte
                 optLen++;
-
               }
 
               if (!isStdString) {
-
                 // ensure we do not have garbage
                 size_t offset = thestring.find('\0', 0);
                 if (offset + 1 < optLen) optLen = offset + 1;
                 thestring = thestring.substr(0, optLen);
-
               }
-
             }
 
             if (!be_quiet) {
-
               fprintf(stderr, "%s: length %zu/%zu \"", FuncName.c_str(), optLen,
                       thestring.length());
               for (uint8_t i = 0; i < thestring.length(); i++) {
-
                 uint8_t c = thestring[i];
                 if (c <= 32 || c >= 127)
                   fprintf(stderr, "\\x%02x", c);
                 else
                   fprintf(stderr, "%c", c);
-
               }
 
               fprintf(stderr, "\"\n");
-
             }
 
             // we take the longer string, even if the compare was to a
@@ -728,22 +628,15 @@ bool AFLLTOPass::runOnModule(Module &M) {
               continue;
 
             dictionary.push_back(thestring.substr(0, optLen));
-
           }
-
         }
-
       }
-
     }
 
     for (auto &BB : F) {
-
       if (F.size() == 1) {
-
         InsBlocks.push_back(&BB);
         continue;
-
       }
 
       uint32_t succ = 0;
@@ -754,36 +647,27 @@ bool AFLLTOPass::runOnModule(Module &M) {
         continue;
 
       if (BlockList.size()) {
-
         int skip = 0;
         for (uint32_t k = 0; k < BlockList.size(); k++) {
-
           if (&BB == BlockList[k]) {
-
             if (debug)
               fprintf(stderr,
                       "DEBUG: Function %s skipping BB with/after __afl_loop\n",
                       F.getName().str().c_str());
             skip = 1;
-
           }
-
         }
 
         if (skip) continue;
-
       }
 
       InsBlocks.push_back(&BB);
-
     }
 
     if (InsBlocks.size() > 0) {
-
       uint32_t i = InsBlocks.size();
 
       do {
-
         --i;
         BasicBlock *              newBB = NULL;
         BasicBlock *              origBB = &(*InsBlocks[i]);
@@ -792,28 +676,21 @@ bool AFLLTOPass::runOnModule(Module &M) {
         uint32_t                  fs = origBB->getParent()->size();
         uint32_t                  countto;
 
-        if (cmp_feedback) {
-          addCompareFeedback(origBB, M);
-        }
+        if (cmp_feedback) { addCompareFeedback(origBB, M); }
 
         for (succ_iterator SI = succ_begin(origBB), SE = succ_end(origBB);
              SI != SE; ++SI) {
-
           BasicBlock *succ = *SI;
           Successors.push_back(succ);
-
         }
 
         if (fs == 1) {
-
           newBB = origBB;
           countto = 1;
 
         } else {
-
           if (TI == NULL || TI->getNumSuccessors() < 2) continue;
           countto = Successors.size();
-
         }
 
         // if (Successors.size() != TI->getNumSuccessors())
@@ -821,21 +698,16 @@ bool AFLLTOPass::runOnModule(Module &M) {
         //        TI->getNumSuccessors());
 
         for (uint32_t j = 0; j < countto; j++) {
-
           if (fs != 1) newBB = llvm::SplitEdge(origBB, Successors[j]);
 
           if (!newBB) {
-
             if (!be_quiet) WARNF("Split failed!");
             continue;
-
           }
 
           if (documentFile) {
-
             fprintf(documentFile, "ModuleID=%llu Function=%s edgeID=%u\n",
                     moduleID, F.getName().str().c_str(), afl_global_id);
-
           }
 
           BasicBlock::iterator IP = newBB->getFirstInsertionPt();
@@ -850,30 +722,27 @@ bool AFLLTOPass::runOnModule(Module &M) {
           Value *MapPtrIdx = nullptr;
 
           if (map_addr) {
-
             MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
 
           } else {
-
             LoadInst *MapPtr = MapPtrLoadCache.lookup(newBB->getParent());
 
             if (!MapPtr) {
-              auto &entrybb = newBB->getParent()->getEntryBlock();
+              auto &      entrybb = newBB->getParent()->getEntryBlock();
               IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
-              MapPtr = IRBStart.CreateLoad(AFLMapPtr);
+              MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
               MapPtr->setMetadata(M.getMDKindID("nosanitize"),
                                   MDNode::get(C, None));
-              MapPtrLoadCache.insert(std::make_pair(newBB->getParent(), MapPtr));
+              MapPtrLoadCache.insert(
+                  std::make_pair(newBB->getParent(), MapPtr));
             }
 
             MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
-
           }
 
           /* Update bitmap */
 
           if (use_threadsafe_counters) {
-
             IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, One,
 #if LLVM_VERSION_MAJOR >= 13
                                 llvm::MaybeAlign(1),
@@ -881,7 +750,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
                                 llvm::AtomicOrdering::Monotonic);
 
           } else {
-
             LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
             Counter->setMetadata(M.getMDKindID("nosanitize"),
                                  MDNode::get(C, None));
@@ -889,29 +757,23 @@ bool AFLLTOPass::runOnModule(Module &M) {
             Value *Incr = IRB.CreateAdd(Counter, One);
 
             if (skip_nozero == NULL) {
-
               auto cf = IRB.CreateICmpEQ(Incr, Zero);
               auto carry = IRB.CreateZExt(cf, Int8Ty);
               Incr = IRB.CreateAdd(Incr, carry);
-
             }
 
             IRB.CreateStore(Incr, MapPtrIdx)
                 ->setMetadata(M.getMDKindID("nosanitize"),
                               MDNode::get(C, None));
-
           }
 
           // done :)
 
           inst_blocks++;
-
         }
 
       } while (i > 0);
-
     }
-
   }
 
   if (documentFile) fclose(documentFile);
@@ -921,7 +783,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
   // do this after each function to fail faster
   if (!be_quiet && afl_global_id > MAP_SIZE &&
       afl_global_id > FS_OPT_MAX_MAPSIZE) {
-
     uint32_t pow2map = 1, map = afl_global_id;
     while ((map = map >> 1))
       pow2map++;
@@ -932,51 +793,42 @@ bool AFLLTOPass::runOnModule(Module &M) {
         "AFL_MAP_SIZE with at least size %u when running afl-fuzz with this "
         "target.",
         afl_global_id, MAP_SIZE, MAP_SIZE_POW2, pow2map, afl_global_id);
-
   }
 
   if (!getenv("AFL_LLVM_LTO_DONTWRITEID") || dictionary.size() || map_addr) {
-
     // yes we could create our own function, insert it into ctors ...
     // but this would be a pain in the butt ... so we use afl-llvm-rt-lto.o
 
     Function *f = M.getFunction("__afl_auto_init_globals");
 
     if (!f) {
-
       fprintf(stderr,
               "Error: init function could not be found (this should not "
               "happen)\n");
       exit(-1);
-
     }
 
     BasicBlock *bb = &f->getEntryBlock();
     if (!bb) {
-
       fprintf(stderr,
               "Error: init function does not have an EntryBlock (this should "
               "not happen)\n");
       exit(-1);
-
     }
 
     BasicBlock::iterator IP = bb->getFirstInsertionPt();
     IRBuilder<>          IRB(&(*IP));
 
     if (map_addr) {
-
       GlobalVariable *AFLMapAddrFixed = new GlobalVariable(
           M, Int64Ty, true, GlobalValue::ExternalLinkage, 0, "__afl_map_addr");
       ConstantInt *MapAddr = ConstantInt::get(Int64Ty, map_addr);
       StoreInst *  StoreMapAddr = IRB.CreateStore(MapAddr, AFLMapAddrFixed);
       StoreMapAddr->setMetadata(M.getMDKindID("nosanitize"),
                                 MDNode::get(C, None));
-
     }
 
     if (getenv("AFL_LLVM_LTO_DONTWRITEID") == NULL) {
-
       uint32_t write_loc = (((afl_global_id + 63) >> 6) << 6);
 
       GlobalVariable *AFLFinalLoc = new GlobalVariable(
@@ -985,11 +837,9 @@ bool AFLLTOPass::runOnModule(Module &M) {
       StoreInst *  StoreFinalLoc = IRB.CreateStore(const_loc, AFLFinalLoc);
       StoreFinalLoc->setMetadata(M.getMDKindID("nosanitize"),
                                  MDNode::get(C, None));
-
     }
 
     if (dictionary.size()) {
-
       size_t memlen = 0, count = 0;
 
       // sort and unique the dictionary
@@ -998,10 +848,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
       dictionary.erase(last, dictionary.end());
 
       for (auto token : dictionary) {
-
         memlen += token.length();
         count++;
-
       }
 
       if (!be_quiet)
@@ -1009,29 +857,22 @@ bool AFLLTOPass::runOnModule(Module &M) {
                count == 1 ? "" : "s");
 
       if (count) {
-
         if ((ptr = (char *)malloc(memlen + count)) == NULL) {
-
           fprintf(stderr, "Error: malloc for %zu bytes failed!\n",
                   memlen + count);
           exit(-1);
-
         }
 
         count = 0;
 
         size_t offset = 0;
         for (auto token : dictionary) {
-
           if (offset + token.length() < 0xfffff0 && count < MAX_AUTO_EXTRAS) {
-
             ptr[offset++] = (uint8_t)token.length();
             memcpy(ptr + offset, token.c_str(), token.length());
             offset += token.length();
             count++;
-
           }
-
         }
 
         GlobalVariable *AFLDictionaryLen =
@@ -1062,21 +903,16 @@ bool AFLLTOPass::runOnModule(Module &M) {
         StoreInst *StoreDict = IRB.CreateStore(AFLDictPtr, AFLDictionary);
         StoreDict->setMetadata(M.getMDKindID("nosanitize"),
                                MDNode::get(C, None));
-
       }
-
     }
-
   }
 
   /* Say something nice. */
 
   if (!be_quiet) {
-
     if (!inst_blocks)
       WARNF("No instrumentation targets found.");
     else {
-
       char modeline[100];
       snprintf(modeline, sizeof(modeline), "%s%s%s%s%s",
                getenv("AFL_HARDEN") ? "hardened" : "non-hardened",
@@ -1087,115 +923,157 @@ bool AFLLTOPass::runOnModule(Module &M) {
       OKF("Instrumented %d locations with no collisions (on average %llu "
           "collisions would be in afl-gcc/vanilla AFL) (%s mode).",
           inst_blocks, calculateCollisions(inst_blocks), modeline);
-
     }
-
   }
 
   MapPtrLoadCache.clear();
 
   return true;
-
 }
 
-bool AFLLTOPass::addCompareFeedback(BasicBlock* BB, Module& M) {
-  LLVMContext &            C = M.getContext();
+bool AFLLTOPass::addCompareFeedback(BasicBlock *BB, Module &M) {
+  LLVMContext &C = M.getContext();
 
-  for (auto &I : (*BB)) {
-    if (CmpInst* CI = dyn_cast<CmpInst>(&I)) {
-      bool skip_I = false;
-      for (User* U : I.users()) {
-        if (isa<BranchInst>(U)) {
-          skip_I = true;
-          break;
-        }
-      }
-      if (skip_I) continue;
+  auto term = BB->getTerminator();
+  if (!term) { return true; }
 
-        BasicBlock::iterator bb_iter(CI);
-        bb_iter++;
-        IRBuilder<> IRB(&*bb_iter);
+  if (BranchInst *BI = dyn_cast<BranchInst>(term)) {
+    if (!BI->isConditional()) { return true; }
 
+    IRBuilder<> IRB(term);
 
-        LoadInst *MapPtr = nullptr;
-        if (! map_addr) {
-            MapPtr = IRB.CreateLoad(AFLMapPtr);
-            MapPtr->setMetadata(M.getMDKindID("nosanitize"),
-                                MDNode::get(C, None));
-        }
+    auto                    cond = BI->getCondition();
+    SmallVector<Value *, 4> worklist;
+    SmallVector<Value *, 4> instrument_list;
 
-        SmallVector<Value*, 8> worklist;
+    worklist.push_back(cond);
 
+    while (!worklist.empty()) {
+      auto val = worklist.pop_back_val();
+      if (CmpInst *CI = dyn_cast<CmpInst>(val)) {
         auto ty = CI->getType();
 
-        if (VectorType* VT = dyn_cast<VectorType>(ty)) {
-        unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
+        if (VectorType *VT = dyn_cast<VectorType>(ty)) {
+          unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
           for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
             auto extracted = IRB.CreateExtractElement(CI, Elem);
-            worklist.push_back(extracted);
+            instrument_list.push_back(extracted);
           }
         } else {
-          worklist.push_back(CI);
+          instrument_list.push_back(CI);
         }
 
-        // loop over worklist
-        for (auto &CmpRes : worklist) {
+      } else if (PHINode *PHI = dyn_cast<PHINode>(val)) {
+        for (auto &x : PHI->incoming_values()) {
+          worklist.push_back(x);
+        }
+      } else if (SelectInst *SI = dyn_cast<SelectInst>(val)) {
+        // TODO: not sure how to handle it
+        // worklist.push_back(SI->getTrueValue());
+        // worklist.push_back(SI->getFalseValue());
 
-          /* Set the ID of the comparison */
-
-          ConstantInt *CurLoc = ConstantInt::get(Int32Ty, afl_global_id++);
-
-          /* Load SHM pointer */
-
-          Value *MapPtrIdx;
-
-          if (map_addr) {
-
-            MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
-
-          } else {
-
-            Function* F = CI->getParent()->getParent();
-            LoadInst *MapPtr = MapPtrLoadCache.lookup(F);
-
-            if (!MapPtr) {
-              auto &entrybb = F->getEntryBlock();
-              IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
-              MapPtr = IRBStart.CreateLoad(AFLMapPtr);
-              MapPtr->setMetadata(M.getMDKindID("nosanitize"),
-                                  MDNode::get(C, None));
-              MapPtrLoadCache.insert(std::make_pair(F, MapPtr));
+      } else if (IntrinsicInst *IC = dyn_cast<IntrinsicInst>(val)) {
+        // handle the llvm.vector.reduce.and.* intrinsics
+        if (auto F = IC->getCalledFunction()) {
+          if (F && F->isIntrinsic()) {
+            auto IID = F->getIntrinsicID();
+            if (IID == Intrinsic::vector_reduce_and) {
+              auto vec = IC->getArgOperand(0);
+              auto ty = vec->getType();
+              if (VectorType *VT = dyn_cast<VectorType>(ty)) {
+                auto ET = VT->getElementType();
+                auto ETI = dyn_cast<IntegerType>(ET);
+                if (ETI && ETI->getBitWidth() == 1) {
+                  unsigned NumElems =
+                      cast<FixedVectorType>(VT)->getNumElements();
+                  for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
+                    auto extracted = IRB.CreateExtractElement(vec, Elem);
+                    instrument_list.push_back(extracted);
+                  }
+                }
+              }
             }
-            MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
-
-          }
-
-          /* Update bitmap */
-              
-          auto result = IRB.CreateZExt(CmpRes, Int8Ty);
-
-          if (use_threadsafe_counters) {
-
-            IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, result,
-#if LLVM_VERSION_MAJOR >= 13
-                                llvm::MaybeAlign(1),
-#endif
-                                llvm::AtomicOrdering::Monotonic);
-
-          } else {
-
-            LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
-            Counter->setMetadata(M.getMDKindID("nosanitize"),
-                                 MDNode::get(C, None));
-
-            Value *Incr = IRB.CreateAdd(Counter, result);
-
-            IRB.CreateStore(Incr, MapPtrIdx)
-                ->setMetadata(M.getMDKindID("nosanitize"),
-                              MDNode::get(C, None));
-
           }
         }
+      } else if (BinaryOperator *BI = dyn_cast<BinaryOperator>(val)) {
+        auto op = BI->getOpcode();
+        switch (op) {
+          case BinaryOperator::BinaryOps::And:
+            worklist.push_back(BI->getOperand(0));
+            worklist.push_back(BI->getOperand(1));
+            break;
+          case BinaryOperator::BinaryOps::Or:
+          case BinaryOperator::BinaryOps::Xor:
+            // TODO: we do not need special handling here, no?
+          default:
+            break;
+        }
+      }
+    }
+
+    // special case if there are no other comparions involved, then we do not
+    // need to chain explicit feedback - there is only one compare and the
+    // branching should give enough feedback.
+    if (instrument_list.size() <= 1) { return true; }
+
+    Value *lastval = nullptr;
+    for (auto &I : instrument_list) {
+      /* Set the ID of the comparison */
+
+      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, afl_global_id++);
+
+      /* Load SHM pointer */
+
+      Value *MapPtrIdx;
+
+      if (map_addr) {
+        MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
+
+      } else {
+        Function *F = term->getParent()->getParent();
+        LoadInst *MapPtr = MapPtrLoadCache.lookup(F);
+
+        if (!MapPtr) {
+          auto &      entrybb = F->getEntryBlock();
+          IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
+          MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
+          MapPtr->setMetadata(M.getMDKindID("nosanitize"),
+                              MDNode::get(C, None));
+          MapPtrLoadCache.insert(std::make_pair(F, MapPtr));
+        }
+        MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
+      }
+
+      /* Update bitmap */
+
+      Value *result = nullptr;
+
+      if (lastval != nullptr) {
+        result = IRB.CreateBinOp(Instruction::BinaryOps::And, lastval, I);
+        lastval = result;
+      } else {
+        result = I;
+        lastval = I;
+      }
+
+      result = IRB.CreateZExt(result, Int8Ty);
+
+      if (use_threadsafe_counters) {
+        IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, result,
+#if LLVM_VERSION_MAJOR >= 13
+                            llvm::MaybeAlign(1),
+#endif
+                            llvm::AtomicOrdering::Monotonic);
+
+      } else {
+        LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+        Value *Incr = IRB.CreateAdd(Counter, result);
+
+        IRB.CreateStore(Incr, MapPtrIdx)
+            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      }
     }
   }
 
@@ -1206,9 +1084,7 @@ char AFLLTOPass::ID = 0;
 
 static void registerAFLLTOPass(const PassManagerBuilder &,
                                legacy::PassManagerBase &PM) {
-
   PM.add(new AFLLTOPass());
-
 }
 
 static RegisterPass<AFLLTOPass> X("afl-lto", "afl++ LTO instrumentation pass",
@@ -1216,4 +1092,3 @@ static RegisterPass<AFLLTOPass> X("afl-lto", "afl++ LTO instrumentation pass",
 
 static RegisterStandardPasses RegisterAFLLTOPass(
     PassManagerBuilder::EP_FullLinkTimeOptimizationLast, registerAFLLTOPass);
-
