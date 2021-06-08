@@ -76,6 +76,9 @@ class AFLLTOPass : public ModulePass {
 
     skip_nozero = getenv("AFL_LLVM_SKIP_NEVERZERO");
 
+    const char * c = getenv("AFL_LLVM_EXPLICIT_CMP_FEEDBACK"); 
+    cmp_feedback = c != nullptr && (c[0] == '1' || c[0] == 'y' || c[0] == 'Y' || c[0] == 't' || c[0] == 'T');
+
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -95,6 +98,21 @@ class AFLLTOPass : public ModulePass {
   unsigned long long int map_addr = 0x10000;
   const char *           skip_nozero = NULL;
   const char *           use_threadsafe_counters = nullptr;
+  bool                   cmp_feedback = false;
+
+  bool addCompareFeedback(BasicBlock* BB, Module& M);
+
+
+  IntegerType *Int8Ty = nullptr;
+  IntegerType *Int32Ty = nullptr;
+  IntegerType *Int64Ty = nullptr;
+
+  ConstantInt *Zero = nullptr;
+  ConstantInt *One = nullptr;
+
+  GlobalVariable *AFLMapPtr = nullptr;
+  Value *         MapPtrFixed = nullptr;
+
   ValueMap<Function*, LoadInst*> MapPtrLoadCache; 
 
 };
@@ -119,9 +137,9 @@ bool AFLLTOPass::runOnModule(Module &M) {
   unsigned long long int moduleID =
       (((unsigned long long int)(rand() & 0xffffffff)) << 32) | getpid();
 
-  IntegerType *Int8Ty = IntegerType::getInt8Ty(C);
-  IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
-  IntegerType *Int64Ty = IntegerType::getInt64Ty(C);
+  Int8Ty = IntegerType::getInt8Ty(C);
+  Int32Ty = IntegerType::getInt32Ty(C);
+  Int64Ty = IntegerType::getInt64Ty(C);
 
   /* Show a banner */
   setvbuf(stdout, NULL, _IONBF, 0);
@@ -186,9 +204,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
   /* Get/set the globals for the SHM region. */
 
-  GlobalVariable *AFLMapPtr = NULL;
-  Value *         MapPtrFixed = NULL;
-
   if (!map_addr) {
 
     AFLMapPtr =
@@ -203,8 +218,8 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
   }
 
-  ConstantInt *Zero = ConstantInt::get(Int8Ty, 0);
-  ConstantInt *One = ConstantInt::get(Int8Ty, 1);
+  Zero = ConstantInt::get(Int8Ty, 0);
+  One = ConstantInt::get(Int8Ty, 1);
 
   // This dumps all inialized global strings - might be useful in the future
   /*
@@ -777,6 +792,10 @@ bool AFLLTOPass::runOnModule(Module &M) {
         uint32_t                  fs = origBB->getParent()->size();
         uint32_t                  countto;
 
+        if (cmp_feedback) {
+          addCompareFeedback(origBB, M);
+        }
+
         for (succ_iterator SI = succ_begin(origBB), SE = succ_end(origBB);
              SI != SE; ++SI) {
 
@@ -1077,6 +1096,110 @@ bool AFLLTOPass::runOnModule(Module &M) {
 
   return true;
 
+}
+
+bool AFLLTOPass::addCompareFeedback(BasicBlock* BB, Module& M) {
+  LLVMContext &            C = M.getContext();
+
+  for (auto &I : (*BB)) {
+    if (CmpInst* CI = dyn_cast<CmpInst>(&I)) {
+      bool skip_I = false;
+      for (User* U : I.users()) {
+        if (isa<BranchInst>(U)) {
+          skip_I = true;
+          break;
+        }
+      }
+      if (skip_I) continue;
+
+        BasicBlock::iterator bb_iter(CI);
+        bb_iter++;
+        IRBuilder<> IRB(&*bb_iter);
+
+
+        LoadInst *MapPtr = nullptr;
+        if (! map_addr) {
+            MapPtr = IRB.CreateLoad(AFLMapPtr);
+            MapPtr->setMetadata(M.getMDKindID("nosanitize"),
+                                MDNode::get(C, None));
+        }
+
+        SmallVector<Value*, 8> worklist;
+
+        auto ty = CI->getType();
+
+        if (VectorType* VT = dyn_cast<VectorType>(ty)) {
+        unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
+          for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
+            auto extracted = IRB.CreateExtractElement(CI, Elem);
+            worklist.push_back(extracted);
+          }
+        } else {
+          worklist.push_back(CI);
+        }
+
+        // loop over worklist
+        for (auto &CmpRes : worklist) {
+
+          /* Set the ID of the comparison */
+
+          ConstantInt *CurLoc = ConstantInt::get(Int32Ty, afl_global_id++);
+
+          /* Load SHM pointer */
+
+          Value *MapPtrIdx;
+
+          if (map_addr) {
+
+            MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
+
+          } else {
+
+            Function* F = CI->getParent()->getParent();
+            LoadInst *MapPtr = MapPtrLoadCache.lookup(F);
+
+            if (!MapPtr) {
+              auto &entrybb = F->getEntryBlock();
+              IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
+              MapPtr = IRBStart.CreateLoad(AFLMapPtr);
+              MapPtr->setMetadata(M.getMDKindID("nosanitize"),
+                                  MDNode::get(C, None));
+              MapPtrLoadCache.insert(std::make_pair(F, MapPtr));
+            }
+            MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
+
+          }
+
+          /* Update bitmap */
+              
+          auto result = IRB.CreateZExt(CmpRes, Int8Ty);
+
+          if (use_threadsafe_counters) {
+
+            IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, result,
+#if LLVM_VERSION_MAJOR >= 13
+                                llvm::MaybeAlign(1),
+#endif
+                                llvm::AtomicOrdering::Monotonic);
+
+          } else {
+
+            LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+            Counter->setMetadata(M.getMDKindID("nosanitize"),
+                                 MDNode::get(C, None));
+
+            Value *Incr = IRB.CreateAdd(Counter, result);
+
+            IRB.CreateStore(Incr, MapPtrIdx)
+                ->setMetadata(M.getMDKindID("nosanitize"),
+                              MDNode::get(C, None));
+
+          }
+        }
+    }
+  }
+
+  return true;
 }
 
 char AFLLTOPass::ID = 0;
