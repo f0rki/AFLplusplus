@@ -711,7 +711,29 @@ bool AFLLTOPass::runOnModule(Module &M) {
           }
 
           BasicBlock::iterator IP = newBB->getFirstInsertionPt();
-          IRBuilder<>          IRB(&(*IP));
+          Instruction *        start_inst = &(*IP);
+          LoadInst *           MapPtr = nullptr;
+          if (!map_addr) {
+            MapPtr = MapPtrLoadCache.lookup(newBB->getParent());
+            auto &entrybb = newBB->getParent()->getEntryBlock();
+            if (!MapPtr) {
+              IRBuilder<> IRBStart(entrybb.getFirstNonPHI());
+              MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
+              MapPtr->setMetadata(M.getMDKindID("nosanitize"),
+                                  MDNode::get(C, None));
+              MapPtrLoadCache.insert(
+                  std::make_pair(newBB->getParent(), MapPtr));
+            }
+            // if we are instrumenting the first basic block in a function we
+            // need to make sure we insert instructions after the (possibly
+            // cached) map pointer load
+            if (start_inst == MapPtr) {
+              BasicBlock::iterator BI(MapPtr);
+              BI++;
+              start_inst = &*BI;
+            }
+          }
+          IRBuilder<> IRB(start_inst);
 
           /* Set the ID of the inserted basic block */
 
@@ -725,18 +747,6 @@ bool AFLLTOPass::runOnModule(Module &M) {
             MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
 
           } else {
-            LoadInst *MapPtr = MapPtrLoadCache.lookup(newBB->getParent());
-
-            if (!MapPtr) {
-              auto &      entrybb = newBB->getParent()->getEntryBlock();
-              IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
-              MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
-              MapPtr->setMetadata(M.getMDKindID("nosanitize"),
-                                  MDNode::get(C, None));
-              MapPtrLoadCache.insert(
-                  std::make_pair(newBB->getParent(), MapPtr));
-            }
-
             MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
           }
 
@@ -937,143 +947,151 @@ bool AFLLTOPass::addCompareFeedback(BasicBlock *BB, Module &M) {
   auto term = BB->getTerminator();
   if (!term) { return true; }
 
+  Value *cond = nullptr;
   if (BranchInst *BI = dyn_cast<BranchInst>(term)) {
     if (!BI->isConditional()) { return true; }
+    cond = BI->getCondition();
+  } else if (ReturnInst *RI = dyn_cast<ReturnInst>(term)) {
+    cond = RI->getReturnValue();
+  } else {
+    return true;
+  }
 
-    IRBuilder<> IRB(term);
+  IRBuilder<> IRB(term);
 
-    auto                    cond = BI->getCondition();
-    SmallVector<Value *, 4> worklist;
-    SmallVector<Value *, 4> instrument_list;
+  SmallVector<Value *, 4> worklist;
+  SmallVector<Value *, 4> instrument_list;
 
-    worklist.push_back(cond);
+  worklist.push_back(cond);
 
-    while (!worklist.empty()) {
-      auto val = worklist.pop_back_val();
-      if (CmpInst *CI = dyn_cast<CmpInst>(val)) {
-        auto ty = CI->getType();
+  while (!worklist.empty()) {
+    auto val = worklist.pop_back_val();
+    if (CmpInst *CI = dyn_cast<CmpInst>(val)) {
+      auto ty = CI->getType();
 
-        if (VectorType *VT = dyn_cast<VectorType>(ty)) {
-          unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
-          for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
-            auto extracted = IRB.CreateExtractElement(CI, Elem);
-            instrument_list.push_back(extracted);
-          }
-        } else {
-          instrument_list.push_back(CI);
+      if (VectorType *VT = dyn_cast<VectorType>(ty)) {
+        unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
+        for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
+          auto extracted = IRB.CreateExtractElement(CI, Elem);
+          instrument_list.push_back(extracted);
         }
+      } else {
+        instrument_list.push_back(CI);
+      }
 
-      } else if (PHINode *PHI = dyn_cast<PHINode>(val)) {
-        for (auto &x : PHI->incoming_values()) {
-          worklist.push_back(x);
-        }
-      } else if (SelectInst *SI = dyn_cast<SelectInst>(val)) {
-        // TODO: not sure how to handle it
-        // worklist.push_back(SI->getTrueValue());
-        // worklist.push_back(SI->getFalseValue());
+    } else if (PHINode *PHI = dyn_cast<PHINode>(val)) {
+      for (auto &x : PHI->incoming_values()) {
+        worklist.push_back(x);
+      }
+    } else if (SelectInst *SI = dyn_cast<SelectInst>(val)) {
+      // TODO: not sure how to handle it
+      // worklist.push_back(SI->getTrueValue());
+      // worklist.push_back(SI->getFalseValue());
 
-      } else if (IntrinsicInst *IC = dyn_cast<IntrinsicInst>(val)) {
-        // handle the llvm.vector.reduce.and.* intrinsics
-        if (auto F = IC->getCalledFunction()) {
-          if (F && F->isIntrinsic()) {
-            auto IID = F->getIntrinsicID();
-            if (IID == Intrinsic::vector_reduce_and) {
-              auto vec = IC->getArgOperand(0);
-              auto ty = vec->getType();
-              if (VectorType *VT = dyn_cast<VectorType>(ty)) {
-                auto ET = VT->getElementType();
-                auto ETI = dyn_cast<IntegerType>(ET);
-                if (ETI && ETI->getBitWidth() == 1) {
-                  unsigned NumElems =
-                      cast<FixedVectorType>(VT)->getNumElements();
-                  for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
-                    auto extracted = IRB.CreateExtractElement(vec, Elem);
-                    instrument_list.push_back(extracted);
-                  }
+    } else if (IntrinsicInst *IC = dyn_cast<IntrinsicInst>(val)) {
+      // handle the llvm.vector.reduce.and.* intrinsics
+      if (auto F = IC->getCalledFunction()) {
+        if (F && F->isIntrinsic()) {
+          auto IID = F->getIntrinsicID();
+          if (IID == Intrinsic::vector_reduce_and) {
+            auto vec = IC->getArgOperand(0);
+            auto ty = vec->getType();
+            if (VectorType *VT = dyn_cast<VectorType>(ty)) {
+              auto ET = VT->getElementType();
+              auto ETI = dyn_cast<IntegerType>(ET);
+              if (ETI && ETI->getBitWidth() == 1) {
+                unsigned NumElems = cast<FixedVectorType>(VT)->getNumElements();
+                for (unsigned Elem = 0; Elem < NumElems; ++Elem) {
+                  auto extracted = IRB.CreateExtractElement(vec, Elem);
+                  instrument_list.push_back(extracted);
                 }
               }
             }
           }
         }
-      } else if (BinaryOperator *BI = dyn_cast<BinaryOperator>(val)) {
-        auto op = BI->getOpcode();
-        switch (op) {
-          case BinaryOperator::BinaryOps::And:
-            worklist.push_back(BI->getOperand(0));
-            worklist.push_back(BI->getOperand(1));
-            break;
-          case BinaryOperator::BinaryOps::Or:
-          case BinaryOperator::BinaryOps::Xor:
-            // TODO: we do not need special handling here, no?
-          default:
-            break;
-        }
+      }
+    } else if (BinaryOperator *BI = dyn_cast<BinaryOperator>(val)) {
+      auto op = BI->getOpcode();
+      switch (op) {
+        case BinaryOperator::BinaryOps::And:
+          worklist.push_back(BI->getOperand(0));
+          worklist.push_back(BI->getOperand(1));
+          break;
+        case BinaryOperator::BinaryOps::Or:
+        case BinaryOperator::BinaryOps::Xor:
+          // TODO: we do not need special handling here, no?
+        default:
+          break;
+      }
+    } else if (auto ZI = dyn_cast<ZExtInst>(val)) {
+      auto ty = ZI->getSrcTy();
+      if (auto ity = dyn_cast<IntegerType>(ty)) {
+        if (ity->getBitWidth() == 1) { worklist.push_back(ZI->getOperand(0)); }
       }
     }
+  }
 
-    // special case if there are no other comparions involved, then we do not
-    // need to chain explicit feedback - there is only one compare and the
-    // branching should give enough feedback.
-    if (instrument_list.size() <= 1) { return true; }
+  // special case if there are no other comparions involved, then we do not
+  // need to chain explicit feedback - there is only one compare and the
+  // branching should give enough feedback.
+  if (instrument_list.size() <= 1) { return true; }
 
-    Value *lastval = nullptr;
-    for (auto &I : instrument_list) {
-      /* Set the ID of the comparison */
+  Value *lastval = nullptr;
+  for (auto &I : instrument_list) {
+    /* Set the ID of the comparison */
 
-      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, afl_global_id++);
+    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, afl_global_id++);
 
-      /* Load SHM pointer */
+    /* Load SHM pointer */
 
-      Value *MapPtrIdx;
+    Value *MapPtrIdx;
 
-      if (map_addr) {
-        MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
+    if (map_addr) {
+      MapPtrIdx = IRB.CreateGEP(MapPtrFixed, CurLoc);
 
-      } else {
-        Function *F = term->getParent()->getParent();
-        LoadInst *MapPtr = MapPtrLoadCache.lookup(F);
+    } else {
+      Function *F = term->getParent()->getParent();
+      LoadInst *MapPtr = MapPtrLoadCache.lookup(F);
 
-        if (!MapPtr) {
-          auto &      entrybb = F->getEntryBlock();
-          IRBuilder<> IRBStart(&(*entrybb.getFirstInsertionPt()));
-          MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
-          MapPtr->setMetadata(M.getMDKindID("nosanitize"),
-                              MDNode::get(C, None));
-          MapPtrLoadCache.insert(std::make_pair(F, MapPtr));
-        }
-        MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
+      if (!MapPtr) {
+        auto &      entrybb = F->getEntryBlock();
+        IRBuilder<> IRBStart(entrybb.getFirstNonPHI());
+        MapPtr = IRBStart.CreateLoad(AFLMapPtr, "_local_afl_area_ptr");
+        MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        MapPtrLoadCache.insert(std::make_pair(F, MapPtr));
       }
+      MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
+    }
 
-      /* Update bitmap */
+    /* Update bitmap */
 
-      Value *result = nullptr;
+    Value *result = nullptr;
 
-      if (lastval != nullptr) {
-        result = IRB.CreateBinOp(Instruction::BinaryOps::And, lastval, I);
-        lastval = result;
-      } else {
-        result = I;
-        lastval = I;
-      }
+    if (lastval != nullptr) {
+      result = IRB.CreateBinOp(Instruction::BinaryOps::And, lastval, I);
+      lastval = result;
+    } else {
+      result = I;
+      lastval = I;
+    }
 
-      result = IRB.CreateZExt(result, Int8Ty);
+    result = IRB.CreateZExt(result, Int8Ty);
 
-      if (use_threadsafe_counters) {
-        IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, result,
+    if (use_threadsafe_counters) {
+      IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, result,
 #if LLVM_VERSION_MAJOR >= 13
-                            llvm::MaybeAlign(1),
+                          llvm::MaybeAlign(1),
 #endif
-                            llvm::AtomicOrdering::Monotonic);
+                          llvm::AtomicOrdering::Monotonic);
 
-      } else {
-        LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
-        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    } else {
+      LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+      Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
-        Value *Incr = IRB.CreateAdd(Counter, result);
+      Value *Incr = IRB.CreateAdd(Counter, result);
 
-        IRB.CreateStore(Incr, MapPtrIdx)
-            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      }
+      IRB.CreateStore(Incr, MapPtrIdx)
+          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     }
   }
 
