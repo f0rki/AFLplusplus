@@ -319,6 +319,20 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
   afl->stage_name = afl->stage_name_buf;
   afl->bytes_trim_in += q->len;
 
+  write_to_testcase(afl, in_buf, q->len);
+  fault = fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+  if (afl->stop_soon || fault == FSRV_RUN_ERROR) { goto abort_trimming; }
+
+  u64 old_cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+
+  if (afl->not_on_tty && afl->debug) {
+
+    if (old_cksum != q->exec_cksum) {
+      WARNF("[Custom Trimming] checksum mismatch - run trim input cksum: %llu ; q->exec_cksum %llu", old_cksum, q->exec_cksum);
+    }
+  }
+
+
   /* Initialize trimming in the custom mutator */
   afl->stage_cur = 0;
   s32 retval = mutator->afl_custom_init_trim(mutator->data, in_buf, q->len);
@@ -334,8 +348,8 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
   if (afl->not_on_tty && afl->debug) {
 
-    SAYF("[Custom Trimming] START: Max %u iterations, %u bytes", afl->stage_max,
-         q->len);
+    DEBUGF("[Custom Trimming] START: Max %u iterations, %u bytes\n", afl->stage_max,
+           q->len);
 
   }
 
@@ -396,8 +410,11 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
       cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
 
     }
+      
+    DEBUGF("[Custom Trimming] status: retlen %zu iteration %u old(%llu) vs new(%llu) \n",
+           retlen, afl->stage_cur, old_cksum, cksum);
 
-    if (likely(retlen && cksum == q->exec_cksum)) {
+    if (likely(retlen && cksum == old_cksum)) {
 
       /* Let's save a clean trace, which will be needed by
          update_bitmap_score once we're done with the trimming stuff.
@@ -424,8 +441,8 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
       if (afl->not_on_tty && afl->debug) {
 
-        SAYF("[Custom Trimming] SUCCESS: %u/%u iterations (now at %u bytes)",
-             afl->stage_cur, afl->stage_max, out_len);
+        DEBUGF("[Custom Trimming] SUCCESS: %u/%u iterations (now at %u bytes)\n",
+               afl->stage_cur, afl->stage_max, out_len);
 
       }
 
@@ -445,8 +462,8 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
       if (afl->not_on_tty && afl->debug) {
 
-        SAYF("[Custom Trimming] FAILURE: %u/%u iterations", afl->stage_cur,
-             afl->stage_max);
+        DEBUGF("[Custom Trimming] FAILURE: %u/%u iterations\n", afl->stage_cur,
+               afl->stage_max);
 
       }
 
@@ -486,7 +503,7 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
   if (afl->not_on_tty && afl->debug) {
 
-    SAYF("[Custom Trimming] DONE: %u bytes -> %u bytes", orig_len, q->len);
+    DEBUGF("[Custom Trimming] DONE: %u bytes -> %u bytes\n", orig_len, q->len);
 
   }
 
