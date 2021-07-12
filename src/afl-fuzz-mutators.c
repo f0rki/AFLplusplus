@@ -325,13 +325,9 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
   u64 old_cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
 
-  if (afl->not_on_tty && afl->debug) {
-
-    if (old_cksum != q->exec_cksum) {
-      WARNF("[Custom Trimming] checksum mismatch - run trim input cksum: %llu ; q->exec_cksum %llu", old_cksum, q->exec_cksum);
-    }
+  if (old_cksum != q->exec_cksum) {
+    WARNF("[Custom Trimming] checksum mismatch - run trim input cksum: %llu ; q->exec_cksum %llu", old_cksum, q->exec_cksum);
   }
-
 
   /* Initialize trimming in the custom mutator */
   afl->stage_cur = 0;
@@ -411,8 +407,10 @@ u8 trim_case_custom(afl_state_t *afl, struct queue_entry *q, u8 *in_buf,
 
     }
       
-    DEBUGF("[Custom Trimming] status: retlen %zu iteration %u old(%llu) vs new(%llu) \n",
-           retlen, afl->stage_cur, old_cksum, cksum);
+    if (afl->not_on_tty && afl->debug) {
+      DEBUGF("[Custom Trimming] status: retlen %zu iteration %u old(%llu) vs new(%llu) \n",
+             retlen, afl->stage_cur, old_cksum, cksum);
+    }
 
     if (likely(retlen && cksum == old_cksum)) {
 
